@@ -1,0 +1,495 @@
+import streamlit as st
+import PyPDF2
+import re
+from datetime import datetime, timedelta
+import pytz
+import uuid
+import pandas as pd
+import base64
+from typing import Dict, Set, Tuple, List
+import calendar
+import io
+import json
+from google.oauth2.credentials import Credentials
+from google_auth_oauthlib.flow import InstalledAppFlow
+from google.auth.transport.requests import Request
+from googleapiclient.discovery import build
+import os
+import pickle
+
+# Custom CSS for better styling
+st.set_page_config(page_title="MCC Timetable Generator", page_icon="📅", layout="centered")
+
+# Apply custom styling
+st.markdown("""
+    <style>
+    .main {
+        padding: 2rem;
+        max-width: 1200px;
+        margin: 0 auto;
+    }
+    .stButton>button {
+        border-radius: 12px;
+        padding: 0.5rem 1rem;
+        background-color: #007AFF;
+        color: white;
+        border: none;
+        transition: all 0.3s ease;
+    }
+    .stButton>button:hover {
+        background-color: #0056b3;
+        transform: translateY(-2px);
+    }
+    .upload-container {
+        border: 2px dashed #ccc;
+        border-radius: 15px;
+        padding: 2rem;
+        text-align: center;
+        margin: 1rem 0;
+    }
+    .css-1d391kg {
+        border-radius: 15px;
+    }
+    .stTextInput>div>div>input {
+        border-radius: 10px;
+    }
+    .stTextArea>div>div>textarea {
+        border-radius: 10px;
+    }
+    .css-1v0mbdj {
+        border-radius: 15px;
+        padding: 1.5rem;
+        box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+    }
+    </style>
+""", unsafe_allow_html=True)
+
+# Google Calendar API Setup
+SCOPES = ['https://www.googleapis.com/auth/calendar.events']
+
+REDIRECT_URI = 'http://localhost:8501/callback'  # Or any other free port and path you choose
+
+def get_google_calendar_service():
+    creds = None
+    if os.path.exists('token.pickle'):
+        with open('token.pickle', 'rb') as token:
+            creds = pickle.load(token)
+
+    if not creds or not creds.valid:
+        if creds and creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+        else:
+            flow = InstalledAppFlow.from_client_secrets_file(
+                'credentials.json', SCOPES, redirect_uri=REDIRECT_URI) # Add redirect_uri here
+            creds = flow.run_local_server(port=0)  # Port 0 lets the system choose a free port.
+        with open('token.pickle', 'wb') as token:
+            pickle.dump(creds, token)
+
+    return build('calendar', 'v3', credentials=creds)
+
+class MCCCalendarParser:
+    def __init__(self):
+        self.day_orders = {}
+        self.holidays = set()
+        self.special_events = {}
+        self.months = {month.upper(): index for index, month in enumerate(calendar.month_name) if month}
+        
+        # Known special events patterns
+        self.special_event_patterns = [
+            r"Staff Study Circle",
+            r"ICA Test",
+            r"ESE Practicals",
+            r"Faculty Development",
+            r"Senatus Meeting",
+            r"IQAC Review Meeting",
+            r"College Scripture Examination",
+            r"Deep Woods",
+            r"Annual Staff Retreat",
+            r"Hall Day"
+        ]
+        
+    def extract_month_year(self, text: str) -> Tuple[str, str]:
+        """Extract month and year from text with improved pattern matching."""
+        month_pattern = r'(JANUARY|FEBRUARY|MARCH|APRIL|MAY|JUNE|JULY|AUGUST|SEPTEMBER|OCTOBER|NOVEMBER|DECEMBER)'
+        year_pattern = r'(20\d{2})'
+        
+        month_match = re.search(month_pattern, text.upper())
+        year_match = re.search(year_pattern, text)
+        
+        if month_match and year_match:
+            return month_match.group(1), year_match.group(1)
+        return None, None
+
+    def extract_date_info(self, line: str) -> Tuple[str, str, str, str]:
+        """Extract date, day, day order, and any special event from a line."""
+        # Enhanced pattern to capture more date formats
+        pattern = r'^\s*(\d{1,2})\s+(MON|TUE|WED|THU|FRI|SAT|SUN)(?:[^0-9]*([1-6])?)?(.*)$'
+        match = re.match(pattern, line)
+        
+        if match:
+            date, day, day_order, remaining_text = match.groups()
+            special_event = self.extract_special_event(remaining_text)
+            return date.strip(), day.strip(), day_order, special_event
+        return None, None, None, None
+
+    def extract_special_event(self, text: str) -> str:
+        """Extract special events from text."""
+        if not text:
+            return None
+            
+        text = text.strip()
+        
+        # Check for holiday indicators
+        holiday_patterns = [
+            r'Holiday',
+            r'- No Classes',
+            r'Pongal',
+            r'Christmas',
+            r'Diwali',
+            r'Bakrid'
+        ]
+        
+        for pattern in holiday_patterns:
+            if re.search(pattern, text, re.IGNORECASE):
+                return f"Holiday: {text}"
+                
+        # Check for special events
+        for pattern in self.special_event_patterns:
+            if re.search(pattern, text, re.IGNORECASE):
+                return text.strip()
+                
+        return None
+
+    def parse_pdf(self, pdf_content) -> Tuple[Dict[str, str], Set[str], Dict[str, str]]:
+        """Parse the PDF content with improved error handling."""
+        current_month = None
+        current_year = None
+        
+        try:
+            pdf_reader = PyPDF2.PdfReader(pdf_content)
+            
+            for page in pdf_reader.pages:
+                try:
+                    text = page.extract_text()
+                    lines = text.split('\n')
+                    
+                    for line in lines:
+                        # Check for month/year header
+                        month, year = self.extract_month_year(line)
+                        if month and year:
+                            current_month = month
+                            current_year = year
+                            continue
+                        
+                        # Process date lines
+                        if current_month and current_year:
+                            date_num, day, day_order, special_event = self.extract_date_info(line)
+                            
+                            if date_num:
+                                try:
+                                    date_obj = datetime(
+                                        int(current_year),
+                                        self.months[current_month.upper()],
+                                        int(date_num)
+                                    )
+                                    date_str = date_obj.strftime("%Y-%m-%d")
+                                    
+                                    if day_order:
+                                        self.day_orders[date_str] = day_order
+                                    elif day in ['SAT', 'SUN']:
+                                        self.holidays.add(date_str)
+                                        
+                                    if special_event:
+                                        self.special_events[date_str] = special_event
+                                        
+                                except ValueError as e:
+                                    st.warning(f"Error processing date: {line} - {str(e)}")
+                                    
+                except Exception as e:
+                    st.warning(f"Error processing page: {str(e)}")
+                    continue
+                    
+        except Exception as e:
+            st.error(f"Error reading PDF: {str(e)}")
+            raise
+            
+        return self.day_orders, self.holidays, self.special_events
+
+    pass
+
+class TimetableGenerator:
+    def __init__(self):
+        self.timezone = pytz.timezone("Asia/Kolkata")
+        self.class_timings = [
+            ("1st Hour", "13:45", "14:35"),
+            ("2nd Hour", "14:35", "15:25"),
+            ("3rd Hour", "15:25", "16:15"),
+            ("Break", "16:15", "16:35"),
+            ("4th Hour", "16:35", "17:25"),
+            ("5th Hour", "17:25", "18:15")
+        ]
+        self.timetable = {}
+        self.day_orders = {}
+
+    def set_timetable(self, timetable_data: Dict[str, List[str]]):
+        self.timetable = timetable_data
+
+    def set_day_orders(self, day_orders: Dict[str, str]):
+        self.day_orders = day_orders
+
+    def generate_event_string(self, subject: str, start_time: str, end_time: str, 
+                            date_str: str, class_name: str, special_event: str = None) -> str:
+        date_obj = datetime.strptime(date_str, "%Y-%m-%d")
+        start_dt = datetime.strptime(f"{date_str} {start_time}", "%Y-%m-%d %H:%M")
+        end_dt = datetime.strptime(f"{date_str} {end_time}", "%Y-%m-%d %H:%M")
+        
+        now = datetime.now(pytz.UTC)
+        
+        start_str = start_dt.strftime("%Y%m%dT%H%M%S")
+        end_str = end_dt.strftime("%Y%m%dT%H%M%S")
+        stamp_str = now.strftime("%Y%m%dT%H%M%SZ")
+        
+        description = f"{class_name} - {subject}"
+        if special_event:
+            description += f"\nNote: {special_event}"
+            
+        return f"""BEGIN:VEVENT
+DTSTAMP:{stamp_str}
+DTSTART;TZID=Asia/Kolkata:{start_str}
+DTEND;TZID=Asia/Kolkata:{end_str}
+UID:{str(uuid.uuid4())}
+DESCRIPTION:{description}
+SEQUENCE:0
+STATUS:CONFIRMED
+SUMMARY:{subject}
+TRANSP:OPAQUE
+BEGIN:VALARM
+ACTION:DISPLAY
+DESCRIPTION:Reminder for {subject}
+TRIGGER:-PT10M
+END:VALARM
+END:VEVENT\n"""
+
+    def generate_holiday_event(self, date_str: str, holiday_name: str = "No Classes") -> str:
+        date_obj = datetime.strptime(date_str, "%Y-%m-%d")
+        next_day = date_obj + timedelta(days=1)
+        
+        now = datetime.now(pytz.UTC)
+        stamp_str = now.strftime("%Y%m%dT%H%M%SZ")
+        
+        date_str_formatted = date_obj.strftime("%Y%m%d")
+        next_day_formatted = next_day.strftime("%Y%m%d")
+        
+        return f"""BEGIN:VEVENT
+DTSTAMP:{stamp_str}
+DTSTART;VALUE=DATE:{date_str_formatted}
+DTEND;VALUE=DATE:{next_day_formatted}
+UID:holiday-{date_str_formatted}@college
+DESCRIPTION:{holiday_name}
+SEQUENCE:0
+STATUS:CONFIRMED
+SUMMARY:{holiday_name}
+TRANSP:TRANSPARENT
+END:VEVENT\n"""
+
+    def generate_timetable_ics(self, special_events: Dict[str, str]) -> str:
+        ics_content = [
+            "BEGIN:VCALENDAR",
+            "VERSION:2.0",
+            "PRODID:-//MCC//Timetable Generator//EN",
+            "CALSCALE:GREGORIAN",
+            "METHOD:PUBLISH",
+            "BEGIN:VTIMEZONE",
+            "TZID:Asia/Kolkata",
+            "BEGIN:STANDARD",
+            "DTSTART:19700101T000000",
+            "TZOFFSETFROM:+0530",
+            "TZOFFSETTO:+0530",
+            "TZNAME:IST",
+            "END:STANDARD",
+            "END:VTIMEZONE"
+        ]
+        
+        for date_str, day_order in sorted(self.day_orders.items()):
+            if day_order in self.timetable:
+                subjects = self.timetable[day_order]
+                subject_index = 0
+                
+                special_event = special_events.get(date_str)
+                
+                for class_name, start_time, end_time in self.class_timings:
+                    if class_name != "Break" and subject_index < len(subjects):
+                        event_str = self.generate_event_string(
+                            subjects[subject_index],
+                            start_time,
+                            end_time,
+                            date_str,
+                            class_name,
+                            special_event
+                        )
+                        ics_content.append(event_str)
+                        subject_index += 1
+            else:
+                holiday_name = special_events.get(date_str, "No Classes")
+                holiday_event = self.generate_holiday_event(date_str, holiday_name)
+                ics_content.append(holiday_event)
+        
+        ics_content.append("END:VCALENDAR")
+        return "\n".join(ics_content)
+    
+    def add_to_google_calendar(self, special_events: Dict[str, str]):
+        service = get_google_calendar_service()
+        added_events = 0
+        
+        for date_str, day_order in sorted(self.day_orders.items()):
+            if day_order in self.timetable:
+                subjects = self.timetable[day_order]
+                subject_index = 0
+                special_event = special_events.get(date_str)
+                
+                for class_name, start_time, end_time in self.class_timings:
+                    if class_name != "Break" and subject_index < len(subjects):
+                        date_obj = datetime.strptime(date_str, "%Y-%m-%d")
+                        start_dt = datetime.strptime(f"{date_str} {start_time}", "%Y-%m-%d %H:%M")
+                        end_dt = datetime.strptime(f"{date_str} {end_time}", "%Y-%m-%d %H:%M")
+                        
+                        event = {
+                            'summary': subjects[subject_index],
+                            'description': f"{class_name}\n{special_event if special_event else ''}",
+                            'start': {
+                                'dateTime': start_dt.isoformat(),
+                                'timeZone': 'Asia/Kolkata',
+                            },
+                            'end': {
+                                'dateTime': end_dt.isoformat(),
+                                'timeZone': 'Asia/Kolkata',
+                            },
+                            'reminders': {
+                                'useDefault': False,
+                                'overrides': [
+                                    {'method': 'popup', 'minutes': 10},
+                                ],
+                            },
+                        }
+                        
+                        service.events().insert(calendarId='primary', body=event).execute()
+                        added_events += 1
+                        subject_index += 1
+        
+        return added_events
+
+def main():
+    st.title("🎓 MCC Timetable Generator")
+    st.markdown("---")
+    
+    # Initialize session state
+    if 'parsed_data' not in st.session_state:
+        st.session_state.parsed_data = None
+    
+    # Center-aligned container
+    container = st.container()
+    
+    with container:
+        # File upload with better styling
+        st.markdown("""
+            <div class="upload-container">
+                <h3>📎 Upload Calendar PDF</h3>
+            </div>
+        """, unsafe_allow_html=True)
+        
+        pdf_file = st.file_uploader("", type=['pdf'])
+        
+        if pdf_file:
+            with st.spinner("Parsing PDF..."):
+                parser = MCCCalendarParser()
+                try:
+                    day_orders, holidays, special_events = parser.parse_pdf(pdf_file)
+                    st.session_state.parsed_data = {
+                        'day_orders': day_orders,
+                        'holidays': holidays,
+                        'special_events': special_events
+                    }
+                    st.success("✅ Calendar PDF parsed successfully!")
+                except Exception as e:
+                    st.error(f"❌ Error parsing PDF: {str(e)}")
+        
+        st.markdown("---")
+        
+        # Timetable Input
+        col1, col2 = st.columns([1, 1])
+        
+        with col1:
+            st.subheader("📚 Input Timetable")
+            timetable_data = {}
+            
+            for day_order in range(1, 7):
+                with st.expander(f"Day Order {day_order}", expanded=True):
+                    subjects = st.text_area(
+                        f"Subjects",
+                        height=100,
+                        key=f"day_{day_order}",
+                        help="Enter one subject per line (5 subjects)",
+                        placeholder="Example:\nCLOUD\nPYTHON\nLAB PYTHON\nPROJECT\nSET"
+                    )
+                    if subjects.strip():
+                        timetable_data[str(day_order)] = [s.strip() for s in subjects.split('\n') if s.strip()]
+        
+        with col2:
+            if st.session_state.parsed_data:
+                st.subheader("📅 Calendar Overview")
+                
+                # Show calendar data in tabs
+                tab1, tab2 = st.tabs(["Day Orders", "Special Events"])
+                
+                with tab1:
+                    day_orders_df = pd.DataFrame(
+                        [(date, order) for date, order in st.session_state.parsed_data['day_orders'].items()],
+                        columns=['Date', 'Day Order']
+                    )
+                    st.dataframe(day_orders_df, use_container_width=True)
+                
+                with tab2:
+                    events_df = pd.DataFrame(
+                        [(date, event) for date, event in st.session_state.parsed_data['special_events'].items()],
+                        columns=['Date', 'Event']
+                    )
+                    st.dataframe(events_df, use_container_width=True)
+        
+        st.markdown("---")
+        
+        # Generate Calendar Section
+        if st.session_state.parsed_data and timetable_data:
+            col3, col4 = st.columns([1, 1])
+            
+            with col3:
+                if st.button("📥 Download Calendar (ICS)"):
+                    generator = TimetableGenerator()
+                    generator.set_timetable(timetable_data)
+                    generator.set_day_orders(st.session_state.parsed_data['day_orders'])
+                    
+                    ics_content = generator.generate_timetable_ics(st.session_state.parsed_data['special_events'])
+                    b64 = base64.b64encode(ics_content.encode()).decode()
+                    href = f'data:text/calendar;base64,{b64}'
+                    st.markdown(
+                        f'<a href="{href}" download="mcc_timetable.ics" '
+                        'class="download-button">⬇️ Download Timetable Calendar</a>',
+                        unsafe_allow_html=True
+                    )
+            
+            with col4:
+                if st.button("📅 Add to Google Calendar"):
+                    try:
+                        generator = TimetableGenerator()
+                        generator.set_timetable(timetable_data)
+                        generator.set_day_orders(st.session_state.parsed_data['day_orders'])
+                        
+                        with st.spinner("Adding events to Google Calendar..."):
+                            added_events = generator.add_to_google_calendar(
+                                st.session_state.parsed_data['special_events']
+                            )
+                            st.success(f"✅ Successfully added {added_events} events to Google Calendar!")
+                    except Exception as e:
+                        st.error(f"❌ Error adding to Google Calendar: {str(e)}")
+
+if __name__ == "__main__":
+    main()
