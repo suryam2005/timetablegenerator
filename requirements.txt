@@ -2,7 +2,9 @@ streamlit
 PyPDF2
 pytz
 pandas
+google-auth
 google-auth-oauthlib
+google-auth-httplib2
+google-auth-transport-requests
 google-api-python-client
 python-dotenv
-google-auth
