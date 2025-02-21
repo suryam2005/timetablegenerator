@@ -21,7 +21,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Configure Streamlit page
-st.set_page_config(page_title="MCC Timetable Generator", page_icon="📅", layout="centered")
+st.set_page_config(page_title="MCC Timetable Generator", page_icon="📅")
 
 # Custom CSS for better styling
 st.markdown("""
@@ -49,6 +49,12 @@ st.markdown("""
         padding: 2rem;
         text-align: center;
         margin: 1rem 0;
+        cursor: pointer;
+        transition: all 0.3s ease;
+    }
+    .upload-container:hover {
+        border-color: #007AFF;
+        background-color: rgba(0, 122, 255, 0.05);
     }
     .css-1d391kg {
         border-radius: 15px;
@@ -64,7 +70,46 @@ st.markdown("""
         padding: 1.5rem;
         box-shadow: 0 4px 6px rgba(0,0,0,0.1);
     }
+    .subject-classroom-container {
+        background: #f8f9fa;
+        border-radius: 10px;
+        padding: 1rem;
+        margin-bottom: 1rem;
+    }
+    .subject-row {
+        display: flex;
+        align-items: center;
+        gap: 1rem;
+        margin-bottom: 0.5rem;
+    }
     </style>
+    <script>
+    const dropContainer = document.querySelector('.upload-container');
+    
+    dropContainer.addEventListener('dragover', e => {
+        e.preventDefault();
+        dropContainer.style.borderColor = '#007AFF';
+        dropContainer.style.backgroundColor = 'rgba(0, 122, 255, 0.05)';
+    });
+    
+    dropContainer.addEventListener('dragleave', e => {
+        e.preventDefault();
+        dropContainer.style.borderColor = '#ccc';
+        dropContainer.style.backgroundColor = 'transparent';
+    });
+    
+    dropContainer.addEventListener('drop', e => {
+        e.preventDefault();
+        dropContainer.style.borderColor = '#ccc';
+        dropContainer.style.backgroundColor = 'transparent';
+        const files = e.dataTransfer.files;
+        if (files.length) {
+            const fileInput = document.querySelector('.stFileUploader input[type="file"]');
+            fileInput.files = files;
+            fileInput.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+    });
+    </script>
 """, unsafe_allow_html=True)
 
 # Google Calendar API Setup
@@ -104,6 +149,7 @@ def get_google_calendar_service():
             return None
             
     return build('calendar', 'v3', credentials=creds)
+
 
 class MCCCalendarParser:
     def __init__(self):
@@ -223,6 +269,8 @@ class MCCCalendarParser:
             
         return self.day_orders, self.holidays, self.special_events
 
+    pass
+
 class TimetableGenerator:
     def __init__(self, start_date=None, end_date=None):
         self.timezone = pytz.timezone("Asia/Kolkata")
@@ -235,12 +283,16 @@ class TimetableGenerator:
             ("5th Hour", "17:25", "18:15")
         ]
         self.timetable = {}
+        self.classroom_mapping = {}
         self.day_orders = {}
         self.start_date = start_date
         self.end_date = end_date
 
     def set_timetable(self, timetable_data: Dict[str, List[str]]):
         self.timetable = timetable_data
+
+    def set_classroom_mapping(self, mapping: Dict[str, str]):
+        self.classroom_mapping = mapping
 
     def set_day_orders(self, day_orders: Dict[str, str]):
         if self.start_date and self.end_date:
@@ -263,16 +315,20 @@ class TimetableGenerator:
         end_str = end_dt.strftime("%Y%m%dT%H%M%S")
         stamp_str = now.strftime("%Y%m%dT%H%M%SZ")
         
+        location = self.classroom_mapping.get(subject, "")
         description = f"{class_name} - {subject}"
+        if location:
+            description += f"\nRoom: {location}"
         if special_event:
             description += f"\nNote: {special_event}"
             
-        return f"""BEGIN:VEVENT
+        event_str = f"""BEGIN:VEVENT
 DTSTAMP:{stamp_str}
 DTSTART;TZID=Asia/Kolkata:{start_str}
 DTEND;TZID=Asia/Kolkata:{end_str}
 UID:{str(uuid.uuid4())}
 DESCRIPTION:{description}
+LOCATION:{location}
 SEQUENCE:0
 STATUS:CONFIRMED
 SUMMARY:{subject}
@@ -283,8 +339,9 @@ DESCRIPTION:Reminder for {subject}
 TRIGGER:-PT10M
 END:VALARM
 END:VEVENT\n"""
+        return event_str
 
-    def generate_holiday_event(self, date_str: str, holiday_name: str = "No Classes") -> str:
+def generate_holiday_event(self, date_str: str, holiday_name: str = "No Classes") -> str:
         date_obj = datetime.strptime(date_str, "%Y-%m-%d")
         next_day = date_obj + timedelta(days=1)
         
@@ -306,7 +363,7 @@ SUMMARY:{holiday_name}
 TRANSP:TRANSPARENT
 END:VEVENT\n"""
 
-    def generate_timetable_ics(self, special_events: Dict[str, str]) -> str:
+def generate_timetable_ics(self, special_events: Dict[str, str]) -> str:
         ics_content = [
             "BEGIN:VCALENDAR",
             "VERSION:2.0",
@@ -351,7 +408,7 @@ END:VEVENT\n"""
         ics_content.append("END:VCALENDAR")
         return "\n".join(ics_content)
     
-    def add_to_google_calendar(self, special_events: Dict[str, str]):
+def add_to_google_calendar(self, special_events: Dict[str, str]):
         service = get_google_calendar_service()
         if not service:
             raise Exception("Google Calendar service not initialized")
@@ -395,6 +452,7 @@ END:VEVENT\n"""
         
         return added_events
 
+
 def main():
     st.title("🎓 MCC Timetable Generator")
     st.markdown("---")
@@ -402,6 +460,8 @@ def main():
     # Initialize session state
     if 'parsed_data' not in st.session_state:
         st.session_state.parsed_data = None
+    if 'subject_classrooms' not in st.session_state:
+        st.session_state.subject_classrooms = {}
         
     # Date Range Selection
     col_date1, col_date2 = st.columns(2)
@@ -430,13 +490,7 @@ def main():
             del st.session_state.google_creds
             st.experimental_rerun()
     
-    # File upload with better styling
-    st.markdown("""
-        <div class="upload-container">
-            <h3>📎 Upload Calendar PDF</h3>
-        </div>
-    """, unsafe_allow_html=True)
-    
+    st.markdown("---") 
     pdf_file = st.file_uploader("", type=['pdf'])
     
     if pdf_file:
@@ -455,12 +509,13 @@ def main():
     
     st.markdown("---")
     
-    # Timetable Input
+    # Timetable Input with Subject-Classroom Mapping
     col1, col2 = st.columns([1, 1])
     
     with col1:
         st.subheader("📚 Input Timetable")
         timetable_data = {}
+        all_subjects = set()
         
         for day_order in range(1, 7):
             with st.expander(f"Day Order {day_order}", expanded=True):
@@ -472,14 +527,30 @@ def main():
                     placeholder="Example:\nCLOUD\nPYTHON\nLAB PYTHON\nPROJECT\nSET"
                 )
                 if subjects.strip():
-                    timetable_data[str(day_order)] = [s.strip() for s in subjects.split('\n') if s.strip()]
+                    subject_list = [s.strip() for s in subjects.split('\n') if s.strip()]
+                    timetable_data[str(day_order)] = subject_list
+                    all_subjects.update(subject_list)
+        
+        # Classroom Mapping Section
+        st.subheader("🏛️ Classroom Mapping")
+        with st.expander("Set Classroom Locations", expanded=True):
+            for subject in sorted(all_subjects):
+                if subject not in st.session_state.subject_classrooms:
+                    st.session_state.subject_classrooms[subject] = ""
+                    
+                st.session_state.subject_classrooms[subject] = st.text_input(
+                    f"Room for {subject}",
+                    value=st.session_state.subject_classrooms.get(subject, ""),
+                    key=f"room_{subject}",
+                    placeholder="Enter classroom/lab location"
+                )
     
     with col2:
         if st.session_state.parsed_data:
             st.subheader("📅 Calendar Overview")
             
             # Show calendar data in tabs
-            tab1, tab2 = st.tabs(["Day Orders", "Special Events"])
+            tab1, tab2, tab3 = st.tabs(["Day Orders", "Special Events", "Classroom Summary"])
             
             with tab1:
                 day_orders_df = pd.DataFrame(
@@ -494,6 +565,13 @@ def main():
                     columns=['Date', 'Event']
                 )
                 st.dataframe(events_df, use_container_width=True)
+                
+            with tab3:
+                classroom_df = pd.DataFrame(
+                    [(subject, room) for subject, room in st.session_state.subject_classrooms.items()],
+                    columns=['Subject', 'Room']
+                )
+                st.dataframe(classroom_df, use_container_width=True)
     
     st.markdown("---")
     
@@ -505,6 +583,7 @@ def main():
             if st.button("📥 Download Calendar (ICS)"):
                 generator = TimetableGenerator(start_date=start_date, end_date=end_date)
                 generator.set_timetable(timetable_data)
+                generator.set_classroom_mapping(st.session_state.subject_classrooms)
                 generator.set_day_orders(st.session_state.parsed_data['day_orders'])
                 
                 ics_content = generator.generate_timetable_ics(st.session_state.parsed_data['special_events'])
@@ -524,6 +603,7 @@ def main():
                     try:
                         generator = TimetableGenerator(start_date=start_date, end_date=end_date)
                         generator.set_timetable(timetable_data)
+                        generator.set_classroom_mapping(st.session_state.subject_classrooms)
                         generator.set_day_orders(st.session_state.parsed_data['day_orders'])
                         
                         with st.spinner("Adding events to Google Calendar..."):

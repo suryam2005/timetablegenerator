@@ -112,14 +112,14 @@ st.markdown("""
     </script>
 """, unsafe_allow_html=True)
 
-# Google Calendar API Setup
 SCOPES = ['https://www.googleapis.com/auth/calendar.events']
 
 # Get environment variables
 GOOGLE_CLIENT_ID = os.getenv('GOOGLE_CLIENT_ID')
 GOOGLE_CLIENT_SECRET = os.getenv('GOOGLE_CLIENT_SECRET')
-REDIRECT_URI = os.getenv('REDIRECT_URI', 'https://timetablegenerator-iftp.onrender.com/callback')
+REDIRECT_URI = os.getenv('REDIRECT_URI', 'https://timetablegenerator-iftp.onrender.com')
 
+# Initialize OAuth flow
 def initialize_google_auth():
     flow = Flow.from_client_config(
         {
@@ -150,14 +150,14 @@ def get_google_calendar_service():
             
     return build('calendar', 'v3', credentials=creds)
 
-
 class MCCCalendarParser:
-    def __init__(self):
+    def __init__(self, start_date=None, end_date=None):
+        self.start_date = start_date
+        self.end_date = end_date
         self.day_orders = {}
         self.holidays = set()
         self.special_events = {}
         self.months = {month.upper(): index for index, month in enumerate(calendar.month_name) if month}
-        
         self.special_event_patterns = [
             r"Staff Study Circle",
             r"ICA Test",
@@ -170,6 +170,12 @@ class MCCCalendarParser:
             r"Annual Staff Retreat",
             r"Hall Day"
         ]
+
+    def is_date_in_range(self, date_str: str) -> bool:
+        if not (self.start_date and self.end_date):
+            return True
+        date_obj = datetime.strptime(date_str, "%Y-%m-%d").date()
+        return self.start_date <= date_obj <= self.end_date
 
     def extract_month_year(self, text: str) -> Tuple[str, str]:
         month_pattern = r'(JANUARY|FEBRUARY|MARCH|APRIL|MAY|JUNE|JULY|AUGUST|SEPTEMBER|OCTOBER|NOVEMBER|DECEMBER)'
@@ -225,51 +231,46 @@ class MCCCalendarParser:
             pdf_reader = PyPDF2.PdfReader(pdf_content)
             
             for page in pdf_reader.pages:
-                try:
-                    text = page.extract_text()
-                    lines = text.split('\n')
+                text = page.extract_text()
+                lines = text.split('\n')
+                
+                for line in lines:
+                    month, year = self.extract_month_year(line)
+                    if month and year:
+                        current_month = month
+                        current_year = year
+                        continue
                     
-                    for line in lines:
-                        month, year = self.extract_month_year(line)
-                        if month and year:
-                            current_month = month
-                            current_year = year
-                            continue
+                    if current_month and current_year:
+                        date_num, day, day_order, special_event = self.extract_date_info(line)
                         
-                        if current_month and current_year:
-                            date_num, day, day_order, special_event = self.extract_date_info(line)
-                            
-                            if date_num:
-                                try:
-                                    date_obj = datetime(
-                                        int(current_year),
-                                        self.months[current_month.upper()],
-                                        int(date_num)
-                                    )
-                                    date_str = date_obj.strftime("%Y-%m-%d")
-                                    
+                        if date_num:
+                            try:
+                                date_obj = datetime(
+                                    int(current_year),
+                                    self.months[current_month.upper()],
+                                    int(date_num)
+                                )
+                                date_str = date_obj.strftime("%Y-%m-%d")
+                                
+                                # Only process dates within the selected range
+                                if self.is_date_in_range(date_str):
                                     if day_order:
                                         self.day_orders[date_str] = day_order
                                     elif day in ['SAT', 'SUN']:
                                         self.holidays.add(date_str)
-                                        
+                                    
                                     if special_event:
                                         self.special_events[date_str] = special_event
                                         
-                                except ValueError as e:
-                                    st.warning(f"Error processing date: {line} - {str(e)}")
-                                    
-                except Exception as e:
-                    st.warning(f"Error processing page: {str(e)}")
-                    continue
-                    
+                            except ValueError as e:
+                                st.warning(f"Error processing date: {line} - {str(e)}")
+                                
         except Exception as e:
             st.error(f"Error reading PDF: {str(e)}")
             raise
             
         return self.day_orders, self.holidays, self.special_events
-
-    pass
 
 class TimetableGenerator:
     def __init__(self, start_date=None, end_date=None):
@@ -341,7 +342,7 @@ END:VALARM
 END:VEVENT\n"""
         return event_str
 
-def generate_holiday_event(self, date_str: str, holiday_name: str = "No Classes") -> str:
+    def generate_holiday_event(self, date_str: str, holiday_name: str = "No Classes") -> str:
         date_obj = datetime.strptime(date_str, "%Y-%m-%d")
         next_day = date_obj + timedelta(days=1)
         
@@ -363,7 +364,7 @@ SUMMARY:{holiday_name}
 TRANSP:TRANSPARENT
 END:VEVENT\n"""
 
-def generate_timetable_ics(self, special_events: Dict[str, str]) -> str:
+    def generate_timetable_ics(self, special_events: Dict[str, str]) -> str:
         ics_content = [
             "BEGIN:VCALENDAR",
             "VERSION:2.0",
@@ -408,7 +409,7 @@ def generate_timetable_ics(self, special_events: Dict[str, str]) -> str:
         ics_content.append("END:VCALENDAR")
         return "\n".join(ics_content)
     
-def add_to_google_calendar(self, special_events: Dict[str, str]):
+    def add_to_google_calendar(self, special_events: Dict[str, str]):
         service = get_google_calendar_service()
         if not service:
             raise Exception("Google Calendar service not initialized")
@@ -452,7 +453,6 @@ def add_to_google_calendar(self, special_events: Dict[str, str]):
         
         return added_events
 
-
 def main():
     st.title("🎓 MCC Timetable Generator")
     st.markdown("---")
@@ -490,12 +490,12 @@ def main():
             del st.session_state.google_creds
             st.experimental_rerun()
     
-    st.markdown("---") 
-    pdf_file = st.file_uploader("", type=['pdf'])
+    st.markdown("---")
+    pdf_file = st.file_uploader("Upload Calendar PDF", type=['pdf'])
     
     if pdf_file:
         with st.spinner("Parsing PDF..."):
-            parser = MCCCalendarParser()
+            parser = MCCCalendarParser(start_date=start_date, end_date=end_date)
             try:
                 day_orders, holidays, special_events = parser.parse_pdf(pdf_file)
                 st.session_state.parsed_data = {
