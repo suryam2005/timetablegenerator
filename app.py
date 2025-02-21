@@ -73,7 +73,7 @@ SCOPES = ['https://www.googleapis.com/auth/calendar.events']
 # Get environment variables
 GOOGLE_CLIENT_ID = os.getenv('GOOGLE_CLIENT_ID')
 GOOGLE_CLIENT_SECRET = os.getenv('GOOGLE_CLIENT_SECRET')
-REDIRECT_URI = os.getenv('REDIRECT_URI', 'https://your-render-app.onrender.com/callback')
+REDIRECT_URI = os.getenv('REDIRECT_URI', 'https://timetablegenerator-iftp.onrender.com/callback')
 
 def initialize_google_auth():
     flow = Flow.from_client_config(
