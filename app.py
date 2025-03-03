@@ -20,8 +20,9 @@ from dotenv import load_dotenv
 # Load environment variables
 load_dotenv()
 
-# Configure Streamlit page
-st.set_page_config(page_title="MCC Timetable Generator", page_icon="📅")
+# Optimize Streamlit performance
+st.set_page_config(page_title="MCC Timetable Generator", page_icon="📅", layout="wide")
+st.cache_resource = st.cache_data  # Use cache_data instead of cache for better performance
 
 # Custom CSS for better styling
 st.markdown("""
@@ -113,14 +114,13 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 SCOPES = ['https://www.googleapis.com/auth/calendar.events']
-
-# Get environment variables
 GOOGLE_CLIENT_ID = os.getenv('GOOGLE_CLIENT_ID')
 GOOGLE_CLIENT_SECRET = os.getenv('GOOGLE_CLIENT_SECRET')
-REDIRECT_URI = os.getenv('REDIRECT_URI', 'https://timetablegenerator-iftp.onrender.com')
+REDIRECT_URI = os.getenv('REDIRECT_URI', 'https://tt.madrasco.space')
 
-# Initialize OAuth flow
 def initialize_google_auth():
+    print(f"Redirect URI: {REDIRECT_URI}")  # Debugging line
+
     flow = Flow.from_client_config(
         {
             "web": {
@@ -128,17 +128,19 @@ def initialize_google_auth():
                 "client_secret": GOOGLE_CLIENT_SECRET,
                 "auth_uri": "https://accounts.google.com/o/oauth2/auth",
                 "token_uri": "https://oauth2.googleapis.com/token",
-                "redirect_uris": [REDIRECT_URI]
+                "redirect_uris": [REDIRECT_URI]  # Ensure this is a valid string
             }
         },
         scopes=SCOPES
     )
+    
+    flow.redirect_uri = REDIRECT_URI  # Explicitly set redirect_uri
     return flow
 
 def get_google_calendar_service():
     if 'google_creds' not in st.session_state:
         return None
-        
+    
     creds = Credentials.from_authorized_user_info(st.session_state.google_creds, SCOPES)
     
     if not creds or not creds.valid:
@@ -148,7 +150,7 @@ def get_google_calendar_service():
         else:
             return None
             
-    return build('calendar', 'v3', credentials=creds)
+    return build('calendar', 'v3', credentials=creds)   
 
 class MCCCalendarParser:
     def __init__(self, start_date=None, end_date=None):
