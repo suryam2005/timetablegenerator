@@ -115,9 +115,9 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 SCOPES = ["openid", "https://www.googleapis.com/auth/userinfo.email", "https://www.googleapis.com/auth/userinfo.profile"]
-GOOGLE_CLIENT_ID = os.getenv('GOOGLE_CLIENT_ID')
-GOOGLE_CLIENT_SECRET = os.getenv('GOOGLE_CLIENT_SECRET')
-REDIRECT_URI = os.getenv('REDIRECT_URI', 'https://tt.madrasco.space')
+GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
+GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET")
+REDIRECT_URI = "https://tt.madrasco.space"
 
 # Initialize session state if not set
 if "google_token" not in st.session_state:
@@ -133,16 +133,36 @@ def initialize_google_auth():
                 "client_secret": GOOGLE_CLIENT_SECRET,
                 "auth_uri": "https://accounts.google.com/o/oauth2/auth",
                 "token_uri": "https://oauth2.googleapis.com/token",
-                "redirect_uris": [REDIRECT_URI]
+                "redirect_uris": [REDIRECT_URI],  # Update with a list
             }
         },
-        scopes=SCOPES
+        scopes=SCOPES,
+        redirect_uri=REDIRECT_URI
     )
+
 
 def get_google_auth_url():
     flow = initialize_google_auth()
-    auth_url, _ = flow.authorization_url(prompt="consent")
+    auth_url, state = flow.authorization_url(prompt="consent", include_granted_scopes="true")
+    
+    # Save state to session (needed to verify callback)
+    st.session_state["oauth_state"] = state
     return auth_url
+
+
+def handle_google_callback():
+    """Extract token from URL params and fetch user info."""
+    query_params = st.query_params  # Get URL params in Streamlit
+    if "code" in query_params:
+        flow = initialize_google_auth()
+        flow.fetch_token(code=query_params["code"])
+        
+        # Save token
+        st.session_state["google_token"] = json.loads(flow.credentials.to_json())
+        
+        # Fetch user info
+        fetch_user_info()
+
 
 def fetch_user_info():
     if st.session_state["google_token"]:
@@ -150,27 +170,58 @@ def fetch_user_info():
         response = requests.get("https://www.googleapis.com/oauth2/v1/userinfo", headers=headers)
         if response.status_code == 200:
             st.session_state["user_info"] = response.json()
+
+
+# Streamlit UI
+st.title("Google OAuth Login")
+
+if "google_token" not in st.session_state or not st.session_state["google_token"]:
+    auth_url = get_google_auth_url()
+    st.markdown(f"[Login with Google]({auth_url})")
+else:
+    st.success("Successfully logged in!")
+    st.json(st.session_state["user_info"])
+
+# Handle OAuth callback
+handle_google_callback()
 def get_google_calendar_service():
-    if 'google_creds' not in st.session_state or not st.session_state.google_creds:
+    """Returns a Google Calendar API service object if credentials are valid."""
+    if 'google_token' not in st.session_state or not st.session_state["google_token"]:
         st.warning("No credentials found. Please sign in first.")
         return None
 
     try:
-        creds = Credentials.from_authorized_user_info(st.session_state.google_creds, SCOPES)
+        creds = Credentials(
+            token=st.session_state["google_token"]["access_token"],
+            refresh_token=st.session_state["google_token"].get("refresh_token"),
+            token_uri="https://oauth2.googleapis.com/token",
+            client_id=GOOGLE_CLIENT_ID,
+            client_secret=GOOGLE_CLIENT_SECRET,
+            scopes=SCOPES
+        )
 
-        if not creds or not creds.valid:
-            if creds and creds.expired and creds.refresh_token:
-                creds.refresh(Request())
-                st.session_state.google_creds = json.loads(creds.to_json())  # Update session state after refresh
-            else:
-                st.warning("Invalid or expired credentials. Please sign in again.")
-                return None
+        if creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+            st.session_state["google_token"]["access_token"] = creds.token  # Update session state after refresh
 
         return build('calendar', 'v3', credentials=creds)
 
     except Exception as e:
         st.error(f"Failed to connect to Google Calendar: {str(e)}")
         return None
+
+# Example UI for authentication
+st.title("Google Authentication")
+
+if not st.session_state.get("user_info"):
+    auth_url = get_google_auth_url()
+    st.markdown(f"[Login with Google]({auth_url})")
+else:
+    st.success(f"Logged in as {st.session_state['user_info']['email']}")
+    if st.button("Logout"):
+        st.session_state["google_token"] = None
+        st.session_state["user_info"] = None
+        st.experimental_rerun()
     
 class MCCCalendarParser:
     def __init__(self, start_date=None, end_date=None):
