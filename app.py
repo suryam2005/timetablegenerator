@@ -11,6 +11,7 @@ import calendar
 import io
 import json
 from google.oauth2.credentials import Credentials
+import requests
 from google_auth_oauthlib.flow import Flow
 from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
@@ -113,45 +114,64 @@ st.markdown("""
     </script>
 """, unsafe_allow_html=True)
 
-SCOPES = ['https://www.googleapis.com/auth/calendar.events']
+SCOPES = ["openid", "https://www.googleapis.com/auth/userinfo.email", "https://www.googleapis.com/auth/userinfo.profile"]
 GOOGLE_CLIENT_ID = os.getenv('GOOGLE_CLIENT_ID')
 GOOGLE_CLIENT_SECRET = os.getenv('GOOGLE_CLIENT_SECRET')
 REDIRECT_URI = os.getenv('REDIRECT_URI', 'https://tt.madrasco.space')
 
-def initialize_google_auth():
-    print(f"Redirect URI: {REDIRECT_URI}")  # Debugging line
+# Initialize session state if not set
+if "google_token" not in st.session_state:
+    st.session_state["google_token"] = None
+    st.session_state["user_info"] = None
 
-    flow = Flow.from_client_config(
+
+def initialize_google_auth():
+    return Flow.from_client_config(
         {
             "web": {
                 "client_id": GOOGLE_CLIENT_ID,
                 "client_secret": GOOGLE_CLIENT_SECRET,
                 "auth_uri": "https://accounts.google.com/o/oauth2/auth",
                 "token_uri": "https://oauth2.googleapis.com/token",
-                "redirect_uris": [REDIRECT_URI]  # Ensure this is a valid string
+                "redirect_uris": [REDIRECT_URI]
             }
         },
         scopes=SCOPES
     )
-    
-    flow.redirect_uri = REDIRECT_URI  # Explicitly set redirect_uri
-    return flow
 
+def get_google_auth_url():
+    flow = initialize_google_auth()
+    auth_url, _ = flow.authorization_url(prompt="consent")
+    return auth_url
+
+def fetch_user_info():
+    if st.session_state["google_token"]:
+        headers = {"Authorization": f"Bearer {st.session_state['google_token']['access_token']}"}
+        response = requests.get("https://www.googleapis.com/oauth2/v1/userinfo", headers=headers)
+        if response.status_code == 200:
+            st.session_state["user_info"] = response.json()
 def get_google_calendar_service():
-    if 'google_creds' not in st.session_state:
+    if 'google_creds' not in st.session_state or not st.session_state.google_creds:
+        st.warning("No credentials found. Please sign in first.")
+        return None
+
+    try:
+        creds = Credentials.from_authorized_user_info(st.session_state.google_creds, SCOPES)
+
+        if not creds or not creds.valid:
+            if creds and creds.expired and creds.refresh_token:
+                creds.refresh(Request())
+                st.session_state.google_creds = json.loads(creds.to_json())  # Update session state after refresh
+            else:
+                st.warning("Invalid or expired credentials. Please sign in again.")
+                return None
+
+        return build('calendar', 'v3', credentials=creds)
+
+    except Exception as e:
+        st.error(f"Failed to connect to Google Calendar: {str(e)}")
         return None
     
-    creds = Credentials.from_authorized_user_info(st.session_state.google_creds, SCOPES)
-    
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-            st.session_state.google_creds = json.loads(creds.to_json())
-        else:
-            return None
-            
-    return build('calendar', 'v3', credentials=creds)   
-
 class MCCCalendarParser:
     def __init__(self, start_date=None, end_date=None):
         self.start_date = start_date
